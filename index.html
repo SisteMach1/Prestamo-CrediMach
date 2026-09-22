@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>PRESTAMOS PRO - Mora Auto</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:Inter,system-ui,Arial}
+body{background:#050507;color:#fff;min-height:100vh;overflow-x:hidden}
+.bg{position:fixed;inset:0;z-index:-1;background:#050507}
+.bg::before{content:'';position:absolute;width:130%;height:130%;top:-15%;left:-15%;background:radial-gradient(600px at 20% 20%, rgba(255,10,42,.18), transparent 60%), radial-gradient(700px at 80% 30%, rgba(255,10,42,.10), transparent 60%);animation:mov 28s infinite alternate}
+@keyframes mov{0%{transform:translate(-2%,-1%)}100%{transform:translate(2%,1%)}}
+.card{border-radius:20px;background:rgba(17,17,17,.9);border:1px solid rgba(255,255,255,.07);padding:16px;transition:.2s}
+.card:hover{border-color:rgba(255,10,42,.2)}
+.btn-red{background:linear-gradient(180deg,#FF1A2F,#E00A22);color:#fff;border:none;border-radius:12px;font-weight:900;cursor:pointer;height:46px;padding:0 18px}
+.btn-green{background:linear-gradient(180deg,#10B981,#059669);color:#fff;border:none;border-radius:12px;font-weight:900;cursor:pointer;height:46px;padding:0 18px}
+.input,select{width:100%;height:46px;background:rgba(0,0,0,.6);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:0 14px;color:#fff;outline:none}
+.badge{padding:5px 10px;border-radius:99px;font-size:10px;font-weight:900}
+.glass{background:rgba(17,17,17,.96);border:1px solid rgba(255,255,255,.1);border-radius:24px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.grid4{display:grid;gap:10px;margin-top:14px}
+@media(max-width:768px){.grid4{grid-template-columns:1fr 1fr}}
+@media(min-width:769px){.grid4{grid-template-columns:repeat(4,1fr)}}
+.clients{display:grid;gap:12px;margin-top:16px}
+@media(min-width:769px){.clients{grid-template-columns:repeat(auto-fill,minmax(360px,1fr))}}
+.progress{height:8px;background:rgba(255,255,255,.08);border-radius:99px;overflow:hidden;margin-top:10px}
+.progress>div{height:100%;background:linear-gradient(90deg,#FF0A2A,#FF6B6B);border-radius:99px}
+</style>
+</head>
+<body>
+<div class="bg"></div>
+<div id="root"></div>
+<canvas id="cnv" style="display:none"></canvas>
+<script>
+const STORAGE='prestamos_v5';
+const AUTH='prestamos_auth_v2';
+const SALT='prestamo_2026_SALT';
+const DEF_USER='admin';
+const DEF_PASS='admin2026';
+function sha256(s){return crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)).then(b=>Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,'0')).join(''))}
+async function hashPass(p){return await sha256(SALT+'|'+p)}
+const today=()=>new Date().toISOString().split('T')[0];
+const add=(d,n,t)=>{let x=new Date(d+'T12:00:00'); if(t==='DIARIA') x.setDate(x.getDate()+n); else if(t==='SEMANAL') x.setDate(x.getDate()+n*7); else x.setMonth(x.getMonth()+n); return x.toISOString().split('T')[0]};
+const fmt=s=>{let [y,m,d]=s.split('-');return d+'/'+m+'/'+y};
+const diff=s=>{let a=new Date();a.setHours(0,0,0,0);let b=new Date(s+'T12:00:00');b.setHours(0,0,0,0);return Math.ceil((b-a)/86400000)};
+
+let prestamos=JSON.parse(localStorage.getItem(STORAGE)||'null')||[
+{id:'1',nombre:'JULIAN FERREYRA',whatsapp:'5493734525075',monto:50000,interes:30,mora:10,tipo:'MENSUAL',cuotas:4,fecha:today(),pagos:[{fecha:today(),monto:16250}]},
+{id:'2',nombre:'Maxi Sanchez',whatsapp:'5493734123456',monto:100000,interes:40,mora:5,tipo:'SEMANAL',cuotas:8,fecha:today(),pagos:[]},
+];
+
+function calc(p){
+  let moraPct = p.mora!=null ? p.mora : (p.tipo==='DIARIA'?2 : p.tipo==='SEMANAL'?5 : 10);
+  let totalBase = p.monto*(1+p.interes/100);
+  let valorBase = totalBase/p.cuotas;
+  let pagado = p.pagos.reduce((a,b)=>a+b.monto,0);
+  let cuotasPagadas = Math.floor(pagado/valorBase+0.0001);
+  let prox = add(p.fecha, cuotasPagadas+1, p.tipo);
+  let atraso=false, dias=0, mora=0;
+  let d = diff(prox);
+  if(d<0 && (totalBase-pagado)>10){ atraso=true; dias=Math.abs(d); if(p.tipo==='DIARIA') mora=valorBase*(moraPct/100)*dias; else if(p.tipo==='SEMANAL') mora=valorBase*(moraPct/100)*Math.ceil(dias/7); else mora=valorBase*(moraPct/100)*Math.ceil(dias/30); }
+  let total = totalBase+mora;
+  let falta = Math.max(0,total-pagado);
+  let pct = total>0 ? Math.min(100,Math.round(pagado/total*100)) : 0;
+  return {total,totalBase,valorBase,valorCuota:total/p.cuotas,pagado,falta,mora,moraPct,cuotasPagadas,prox,atraso,dias,pct};
+}
+
+let authData=JSON.parse(localStorage.getItem(AUTH)||'null');
+let isAuth=false, q='', fil='TODOS', editing=null, showForm=false, showPago=null, showTicket=null, showSettings=false, loginErr='';
+
+async function init(){
+ if(!authData){let h=await hashPass(DEF_PASS);authData={user:DEF_USER,hash:h};localStorage.setItem(AUTH,JSON.stringify(authData))}
+ if(sessionStorage.getItem('prest_session')==='ok') isAuth=true;
+ render();
+}
+function save(){localStorage.setItem(STORAGE,JSON.stringify(prestamos));render()}
+async function tryLogin(){
+ let u=document.getElementById('lu').value.trim().toLowerCase();
+ let p=document.getElementById('lp').value;
+ if(!u||!p){loginErr='Faltan datos';render();return}
+ let hp=await hashPass(p);
+ if(u!==authData.user.toLowerCase()||hp!==authData.hash){loginErr='Usuario o clave incorrectos';render();return}
+ isAuth=true;sessionStorage.setItem('prest_session','ok');render();
+}
+function logout(){sessionStorage.removeItem('prest_session');isAuth=false;render()}
+
+function render(){
+ let root=document.getElementById('root');
+ if(!isAuth){
+   root.innerHTML=`<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px"><div class="glass" style="padding:24px;width:100%;max-width:380px"><div style="font-weight:900;font-size:20px">PRESTAMOS <span style="color:#FF0A2A">PRO</span></div><div style="margin-top:18px;display:grid;gap:10px"><input id="lu" value="admin" placeholder="Usuario" class="input"><input id="lp" type="password" placeholder="Clave" class="input" onkeydown="if(event.key==='Enter')tryLogin()">${loginErr?`<div style="background:rgba(255,10,42,.15);padding:10px;border-radius:10px;font-size:12px;color:#FF6B6B">${loginErr}</div>`:''}<button onclick="tryLogin()" class="btn-red">ENTRAR</button><div style="font-size:10px;opacity:.4;text-align:center">admin / admin2026</div></div></div></div>`;
+   return;
+ }
+ let filtered=prestamos.filter(p=>{let c=calc(p); let mq=!q||p.nombre.toLowerCase().includes(q.toLowerCase()); if(!mq) return false; if(fil==='TODOS') return true; if(fil==='ATRASADO') return c.atraso; if(fil==='PAGADO') return c.falta<10; if(fil==='AL DIA') return !c.atraso && c.falta>=10; return true});
+ let totalPrestado=prestamos.reduce((a,p)=>a+p.monto,0);
+ let totalCobrar=prestamos.reduce((a,p)=>a+calc(p).total,0);
+ let totalCobrado=prestamos.reduce((a,p)=>a+calc(p).pagado,0);
+ let atrasados=prestamos.filter(p=>calc(p).atraso).length;
+
+ let h=`<div style="max-width:980px;margin:0 auto;padding:14px">
+ <div style="display:flex;justify-content:space-between;align-items:center;height:64px"><div style="font-weight:900;font-size:20px">PRESTAMOS <span style="color:#FF0A2A">PRO</span> <span style="font-size:10px;opacity:.4">MORA AUTO</span></div><button onclick="showSettings=true;render()" style="width:44px;height:44px;border-radius:12px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.1);color:#fff">⚙️</button></div>
+ <div class="grid4">
+  <div class="card"><div style="font-size:10px;opacity:.5">PRESTADO</div><div style="font-size:20px;font-weight:900;margin-top:4px">$${totalPrestado.toLocaleString('es-AR')}</div></div>
+  <div class="card"><div style="font-size:10px;opacity:.5">A COBRAR</div><div style="font-size:20px;font-weight:900;margin-top:4px;color:#FFD60A">$${Math.round(totalCobrar).toLocaleString('es-AR')}</div></div>
+  <div class="card"><div style="font-size:10px;opacity:.5">COBRADO</div><div style="font-size:20px;font-weight:900;margin-top:4px;color:#10B981">$${Math.round(totalCobrado).toLocaleString('es-AR')}</div></div>
+  <div class="card" style="${atrasados>0?'border-color:#FF0A2A':''}"><div style="font-size:10px;opacity:.5">ATRASADOS</div><div style="font-size:20px;font-weight:900;margin-top:4px;color:#FF6B6B">${atrasados}</div></div>
+ </div>
+ <div style="display:flex;gap:8px;margin-top:16px"><input oninput="q=this.value;render()" value="${q}" placeholder="Buscar nombre..." class="input" style="flex:1"><button onclick="openNew()" class="btn-red">+ PRESTAMO</button></div>
+ <div style="display:flex;gap:8px;margin-top:12px;overflow:auto">${['TODOS','AL DIA','ATRASADO','PAGADO'].map(x=>`<button onclick="fil='${x}';render()" style="height:34px;padding:0 14px;border-radius:99px;border:1px solid ${fil===x?'#FF0A2A':'rgba(255,255,255,.15)'};background:${fil===x?'#FF0A2A':'rgba(255,255,255,.06)'};color:#fff;font-size:11px;font-weight:800">${x}</button>`).join('')}</div>
+ <div class="clients">
+ ${filtered.map(p=>{
+   let c=calc(p); let col=c.atraso?'#FF0A2A':c.falta<10?'#10B981':'#F59E0B';
+   return `<div class="card" style="${c.atraso?'border-color:rgba(255,10,42,.4);background:linear-gradient(135deg, rgba(255,10,42,.12), rgba(17,17,17,.9))':''}">
+   <div style="display:flex;justify-content:space-between"><div><div style="font-weight:900">${p.nombre}</div><div style="font-size:11px;opacity:.5;margin-top:2px">${p.tipo} • ${p.cuotas} cuotas • ${p.interes}% • Mora ${p.mora}%</div><div style="margin-top:6px;display:flex;gap:6px"><span style="font-size:10px;background:rgba(255,255,255,.06);padding:3px 8px;border-radius:8px">Prest: $${p.monto.toLocaleString()}</span><span style="font-size:10px;background:rgba(255,214,10,.12);color:#FFD60A;padding:3px 8px;border-radius:8px">Cuota $${Math.round(c.valorCuota).toLocaleString()}</span></div></div><span class="badge" style="background:${col}18;color:${col};border:1px solid ${col}30">${c.atraso?`ATRASADO ${c.dias}d`:c.falta<10?'PAGADO':'AL DIA'}</span></div>
+   <div class="grid2" style="margin-top:12px"><div><div style="font-size:9px;opacity:.5">TOTAL</div><div style="font-weight:900">$${Math.round(c.total).toLocaleString()}</div></div><div><div style="font-size:9px;opacity:.5">FALTA</div><div style="font-weight:900;color:${c.falta<10?'#10B981':'#FF6B6B'}">$${Math.round(c.falta).toLocaleString()}</div></div></div>
+   <div class="progress"><div style="width:${c.pct}%"></div></div>
+   <div style="font-size:10px;opacity:.5;margin-top:4px;display:flex;justify-content:space-between"><span>${c.cuotasPagadas}/${p.cuotas} pagadas</span><span>${c.pct}%</span></div>
+   ${c.atraso?`<div style="margin-top:8px;background:rgba(255,10,42,.15);border:1px solid rgba(255,10,42,.25);padding:8px;border-radius:10px;font-size:11px;font-weight:700;color:#FF8A8A">⚠️ ${c.dias} días atraso • Mora +$${Math.round(c.mora).toLocaleString()} (${c.moraPct}%)<br>Próx vto: ${fmt(c.prox)}</div>`:`<div style="margin-top:6px;font-size:10px;opacity:.5">Próx vto: ${fmt(c.prox)}</div>`}
+   <div style="display:flex;gap:6px;margin-top:12px"><button onclick="openPago('${p.id}')" class="btn-green" style="height:36px;font-size:11px">PAGO</button><button onclick="openTicket('${p.id}')" class="btn-red" style="height:36px;font-size:11px">TICKET</button><button onclick="editPrest('${p.id}')" style="height:36px;width:36px;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff">✎</button><button onclick="borrar('${p.id}')" style="height:36px;width:36px;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#FF6B6B">✕</button></div>
+   </div>`;
+ }).join('')}
+ </div>
+ </div>`;
+
+ if(showForm){
+   let d=editing||{nombre:'',whatsapp:'',monto:50000,interes:30,mora:10,tipo:'MENSUAL',cuotas:4,fecha:today()};
+   h+=`<div style="position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.8);display:flex;align-items:flex-end;justify-content:center"><div class="glass" style="width:100%;max-width:460px;border-radius:24px 24px 0 0;padding:20px;max-height:92vh;overflow:auto"><div style="display:flex;justify-content:space-between"><b>${editing?'EDITAR':'NUEVO'} PRESTAMO</b><button onclick="showForm=false;render()" style="width:32px;height:32px;border-radius:10px;background:rgba(255,255,255,.1);border:none;color:#fff">✕</button></div><div style="margin-top:16px;display:grid;gap:10px"><input id="fn" value="${d.nombre}" placeholder="Nombre" class="input"><input id="fw" value="${d.whatsapp}" placeholder="WhatsApp" class="input"><input id="fm" type="number" value="${d.monto}" placeholder="Monto" class="input"><div class="grid2"><select id="fi"><option value="20" ${d.interes==20?'selected':''}>Interés 20%</option><option value="30" ${d.interes==30?'selected':''}>Interés 30%</option><option value="40" ${d.interes==40?'selected':''}>Interés 40%</option><option value="45" ${d.interes==45?'selected':''}>Interés 45%</option></select><select id="fmo"><option value="2" ${d.mora==2?'selected':''}>Mora 2%</option><option value="5" ${d.mora==5?'selected':''}>Mora 5%</option><option value="10" ${d.mora==10?'selected':''}>Mora 10%</option><option value="15" ${d.mora==15?'selected':''}>Mora 15%</option></select></div><div class="grid2"><select id="ft"><option value="MENSUAL" ${d.tipo=='MENSUAL'?'selected':''}>Mensual</option><option value="SEMANAL" ${d.tipo=='SEMANAL'?'selected':''}>Semanal</option><option value="DIARIA" ${d.tipo=='DIARIA'?'selected':''}>Diaria</option></select><input id="fc" type="number" value="${d.cuotas}" placeholder="Cuotas" class="input"></div><input id="ff" type="date" value="${d.fecha}" class="input"><button onclick="savePrest()" class="btn-red" style="height:52px">GUARDAR</button></div></div></div>`;
+ }
+ if(showPago){
+   let p=prestamos.find(x=>x.id===showPago); let c=calc(p);
+   h+=`<div style="position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:16px"><div class="glass" style="padding:20px;width:100%;max-width:380px"><div style="display:flex;justify-content:space-between"><b>PAGO - ${p.nombre}</b><button onclick="showPago=null;render()" style="width:32px;height:32px;border-radius:10px;background:rgba(255,255,255,.1);border:none;color:#fff">✕</button></div><div style="margin-top:12px;background:#000;padding:12px;border-radius:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px"><div><div style="font-size:9px;opacity:.5">FALTA</div><div style="font-weight:900;color:#FF6B6B">$${Math.round(c.falta).toLocaleString()}</div></div><div><div style="font-size:9px;opacity:.5">CUOTA</div><div style="font-weight:900">$${Math.round(c.valorCuota).toLocaleString()}</div></div>${c.mora>0?`<div style="grid-column:1/3;background:rgba(255,10,42,.15);padding:8px;border-radius:8px;font-size:11px;color:#FF8A8A">Mora: +$${Math.round(c.mora).toLocaleString()}</div>`:''}</div><div style="margin-top:12px;display:grid;gap:10px"><input id="mp" type="number" value="${Math.round(c.valorCuota)}" placeholder="Monto pago" class="input"><input id="fp" type="date" value="${today()}" class="input"><button onclick="confirmPago()" class="btn-green">CONFIRMAR PAGO</button><div style="font-size:11px;opacity:.5">Historial: ${p.pagos.map(x=>fmt(x.fecha)+' $'+x.monto).join('<br>')||'Sin pagos'}</div></div></div></div>`;
+ }
+ if(showTicket){
+   let p=prestamos.find(x=>x.id===showTicket); let c=calc(p);
+   h+=`<div style="position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.9);display:flex;align-items:center;justify-content:center;padding:12px"><div style="width:100%;max-width:380px;background:#fff;color:#000;border-radius:20px;overflow:hidden"><div style="padding:18px;text-align:center"><div style="font-weight:900;font-size:18px">PRESTAMOS <span style="color:#FF0A2A">PRO</span></div><div style="margin-top:8px;display:inline-block;background:#FFD60A;padding:6px 12px;border-radius:99px;font-size:11px;font-weight:900">COMPROBANTE</div><div style="margin-top:14px;text-align:left;display:grid;gap:8px;font-size:12px"><div style="display:flex;justify-content:space-between"><span>Cliente</span><b>${p.nombre}</b></div><div style="display:flex;justify-content:space-between"><span>Préstamo</span><b>$${p.monto} +${p.interes}%</b></div><div style="display:flex;justify-content:space-between"><span>Total</span><b>$${Math.round(c.total).toLocaleString()}</b></div><div style="display:flex;justify-content:space-between"><span>Pagado</span><b style="color:#10B981">$${Math.round(c.pagado).toLocaleString()}</b></div><div style="display:flex;justify-content:space-between"><span>Falta</span><b style="color:#FF0A2A">$${Math.round(c.falta).toLocaleString()}</b></div>${c.mora>0?`<div style="display:flex;justify-content:space-between;background:#FF0A2A18;padding:6px;border-radius:8px"><span>Mora ${c.moraPct}% (${c.dias}d)</span><b>+$${Math.round(c.mora).toLocaleString()}</b></div>`:''}</div></div><div style="padding:12px;background:#000;display:grid;grid-template-columns:1fr 1fr;gap:8px"><a href="https://wa.me/${p.whatsapp.replace(/[^0-9]/g,'')}" target="_blank" style="height:44px;border-radius:99px;background:#25D366;color:#000;font-weight:900;display:flex;align-items:center;justify-content:center;text-decoration:none">WA</a><button onclick="showTicket=null;render()" style="height:44px;border-radius:99px;background:#FFD60A;color:#000;font-weight:900;border:none">CERRAR</button></div></div></div>`;
+ }
+ if(showSettings){
+   h+=`<div style="position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:16px"><div class="glass" style="padding:20px;width:100%;max-width:360px"><div style="display:flex;justify-content:space-between"><b>AJUSTES</b><button onclick="showSettings=false;render()" style="width:32px;height:32px;border-radius:10px;background:rgba(255,255,255,.1);border:none;color:#fff">✕</button></div><div style="margin-top:16px;display:grid;gap:10px"><button onclick="logout()" class="btn-red">CERRAR SESIÓN</button></div></div></div>`;
+ }
+ root.innerHTML=h;
+}
+function openNew(){editing=null;showForm=true;render()}
+function editPrest(id){editing=prestamos.find(p=>p.id===id);showForm=true;render()}
+function savePrest(){
+ let d={nombre:document.getElementById('fn').value.trim(),whatsapp:document.getElementById('fw').value.trim(),monto:Number(document.getElementById('fm').value),interes:Number(document.getElementById('fi').value),mora:Number(document.getElementById('fmo').value),tipo:document.getElementById('ft').value,cuotas:Number(document.getElementById('fc').value),fecha:document.getElementById('ff').value};
+ if(!d.nombre||!d.monto) return alert('Faltan datos');
+ if(editing){let i=prestamos.findIndex(p=>p.id===editing.id);prestamos[i]={...prestamos[i],...d}}else{prestamos.unshift({id:Date.now().toString(),pagos:[],...d})}
+ showForm=false;editing=null;save();
+}
+function openPago(id){showPago=id;render()}
+function confirmPago(){let p=prestamos.find(x=>x.id===showPago);let m=Number(document.getElementById('mp').value);let f=document.getElementById('fp').value;if(!m) return alert('Monto');p.pagos.push({fecha:f,monto:m});showPago=null;save()}
+function openTicket(id){showTicket=id;render()}
+function borrar(id){if(confirm('Borrar?')){prestamos=prestamos.filter(p=>p.id!==id);save()}}
+init();
+</script>
+</body>
+</html>
